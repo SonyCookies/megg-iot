@@ -1,0 +1,25 @@
+[Unit]
+Description=MEGG IoT Backend Service
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/megg-iot-backend
+Environment=ARDUINO_PORT=/dev/ttyUSB0
+Environment=ARDUINO_BAUDRATE=9600
+Environment=IOT_BACKEND_HOST=0.0.0.0
+Environment=IOT_BACKEND_PORT=8765
+ExecStart=/home/pi/megg-iot-backend/venv/bin/python simple_main.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Give the service access to serial ports
+SupplementaryGroups=dialout
+
+[Install]
+WantedBy=multi-user.target

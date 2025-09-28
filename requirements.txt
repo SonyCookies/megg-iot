@@ -1,0 +1,11 @@
+# MEGG IoT Backend - Cross-Platform WebSocket Server
+# Dependencies for Arduino integration and calibration
+
+websockets>=12.0
+python-dotenv>=1.0.0
+pyserial>=3.5
+
+# Optional dependencies for enhanced functionality
+# Uncomment if needed:
+# psutil>=5.9.0  # System monitoring
+# RPi.GPIO>=0.7.1  # Raspberry Pi GPIO access (if needed)
