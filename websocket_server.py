@@ -3,6 +3,7 @@
 import asyncio
 import json
 import websockets
+import os
 from typing import Dict, Any
 from simple_config import HOST, PORT
 from modules import SystemManager
@@ -16,10 +17,14 @@ class WebSocketServer:
     async def start_server(self):
         """Start WebSocket server"""
         try:
+            # Use environment variables for Render hosting
+            host = os.getenv("HOST", HOST)
+            port = int(os.getenv("PORT", PORT))
+            
             self.server = await websockets.serve(
                 self.handle_client,
-                HOST,
-                PORT
+                host,
+                port
             )
             self.running = True
             self.system_manager.set_server_running(True)
@@ -27,8 +32,8 @@ class WebSocketServer:
             # Initialize Arduino connection
             await self.system_manager.initialize_arduino()
             
-            print(f"🌐 MEGG IoT WebSocket Server started on ws://{HOST}:{PORT}")
-            print(f"📡 Server running on: ws://localhost:{PORT}")
+            print(f"🌐 MEGG IoT WebSocket Server started on ws://{host}:{port}")
+            print(f"📡 Server running on: ws://localhost:{port}")
             print("🚀 Ready for client connections!")
             print("💡 Modular backend with real Arduino calibration support")
             
