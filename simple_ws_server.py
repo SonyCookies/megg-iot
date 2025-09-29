@@ -5,8 +5,8 @@ import asyncio
 import json
 import websockets
 
-async def handle_client(websocket, path):
-    """Handle WebSocket client connections - CORRECT SIGNATURE"""
+async def handle_client(websocket):
+    """Handle WebSocket client connections - NEW WEBSOCKETS LIBRARY SIGNATURE"""
     print(f"🔌 New client connected: {websocket.remote_address}")
     
     try:
