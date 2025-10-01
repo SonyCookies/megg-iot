@@ -12,6 +12,7 @@ import os
 import platform
 from datetime import datetime
 from dotenv import load_dotenv
+from modules.calibration import CalibrationRouter
 
 # Load environment variables
 load_dotenv()
@@ -20,6 +21,7 @@ class MEGGIoTServer:
     def __init__(self):
         self.arduino = None
         self.connected_clients = set()
+        self.calibration_router: CalibrationRouter | None = None
         
         # Auto-detect ports based on operating system
         if platform.system() == "Windows":
@@ -113,45 +115,17 @@ class MEGGIoTServer:
             return {"success": False, "error": str(e)}
     
     async def handle_calibration(self, component):
-        """Handle calibration request"""
-        print(f"🔧 Starting {component} calibration...")
-        
-        # Send calibration command to Arduino
-        command = f"CALIBRATE_{component}"
-        result = await self.send_arduino_command(command)
-        
-        if result["success"]:
-            # Parse Arduino response
-            response_lines = result["response"]
-            success = any("CALIBRATION_COMPLETE" in line for line in response_lines)
-            error = any("ERROR" in line for line in response_lines)
-            
-            if success:
-                message = next((line for line in response_lines if component in line), f"{component} calibration completed")
-                status = "completed"
-            elif error:
-                message = next((line for line in response_lines if "ERROR" in line), f"{component} calibration failed")
-                status = "failed"
-            else:
-                message = f"{component} calibration completed"
-                status = "completed"
-        else:
-            message = f"{component} calibration failed: {result['error']}"
-            status = "failed"
-            success = False
-        
-        # Send result to all connected clients
-        calibration_result = {
+        """Handle calibration request via router"""
+        if self.calibration_router is None:
+            self.calibration_router = CalibrationRouter(self.send_arduino_command)
+        result = await self.calibration_router.calibrate_component(component)
+        # Broadcast in standard envelope
+        payload = {
             "type": "calibration_result",
-            "component": component,
-            "status": status,
-            "success": success,
-            "message": message,
-            "timestamp": datetime.now().isoformat()
+            **result,
         }
-        
-        await self.broadcast_to_clients(calibration_result)
-        return calibration_result
+        await self.broadcast_to_clients(payload)
+        return payload
     
     async def broadcast_to_clients(self, message):
         """Send message to all connected WebSocket clients"""
@@ -168,7 +142,7 @@ class MEGGIoTServer:
             # Remove disconnected clients
             self.connected_clients -= disconnected
     
-    async def handle_client(self, websocket, path):
+    async def handle_client(self, websocket):
         """Handle WebSocket client connection"""
         print(f"🔌 New client connected: {websocket.remote_address}")
         self.connected_clients.add(websocket)
