@@ -65,13 +65,19 @@ class CalibrationRouter:
             error = any("ERROR" in line for line in response_lines)
 
             if success:
-                message = next((line for line in response_lines if component in line), f"{component} calibration completed")
+                # Create clean user-facing message
+                message = f"{component} calibration completed successfully"
                 status = "completed"
             elif error:
-                message = next((line for line in response_lines if "ERROR" in line), f"{component} calibration failed")
+                # Extract error message if available
+                error_line = next((line for line in response_lines if "ERROR" in line), "")
+                if error_line:
+                    message = f"{component} calibration failed: {error_line}"
+                else:
+                    message = f"{component} calibration failed"
                 status = "failed"
             else:
-                message = f"{component} calibration completed"
+                message = f"{component} calibration completed successfully"
                 status = "completed"
         else:
             message = f"{component} calibration failed: {result.get('error', 'Unknown error')}"

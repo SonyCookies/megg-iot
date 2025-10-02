@@ -55,8 +55,19 @@ class MEGGIoTServer:
         for port in ports_to_try:
             try:
                 print(f"🔌 Trying to connect to Arduino on {port}...")
-                self.arduino = serial.Serial(port, 115200, timeout=1)
+                self.arduino = serial.Serial(
+                    port=port,
+                    baudrate=115200,
+                    timeout=1,
+                    write_timeout=1,
+                    dsrdtr=False,  # Disable DTR to prevent auto-reset
+                    rtscts=False   # Disable RTS/CTS
+                )
                 await asyncio.sleep(2)  # Wait for Arduino to initialize
+                
+                # Clear any startup data in buffers
+                self.arduino.reset_input_buffer()
+                self.arduino.reset_output_buffer()
                 
                 # Test connection
                 self.arduino.write(b"STATUS\n")
@@ -82,14 +93,20 @@ class MEGGIoTServer:
             return {"success": False, "error": "Arduino not connected"}
             
         try:
+            # Clear any pending data in buffer BEFORE sending command
+            self.arduino.reset_input_buffer()
+            self.arduino.reset_output_buffer()
+            
             # Send command
+            print(f"🔧 Sending command: {command}")
             self.arduino.write(f"{command}\n".encode())
+            self.arduino.flush()  # Ensure command is sent immediately
             await asyncio.sleep(0.5)
             
             # Read response
             response_lines = []
             timeout = 0
-            while timeout < 50:  # 5 second timeout
+            while timeout < 150:  # 15 second timeout (for NEMA23 long calibration)
                 if self.arduino.in_waiting > 0:
                     line = self.arduino.readline().decode().strip()
                     if line:
