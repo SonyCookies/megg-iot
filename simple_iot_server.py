@@ -96,12 +96,13 @@ class MEGGIoTServer:
             # Clear any pending data in buffer BEFORE sending command
             self.arduino.reset_input_buffer()
             self.arduino.reset_output_buffer()
+            await asyncio.sleep(0.1)  # Small delay after clearing buffers
             
             # Send command
             print(f"🔧 Sending command: {command}")
             self.arduino.write(f"{command}\n".encode())
             self.arduino.flush()  # Ensure command is sent immediately
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.3)  # Wait for Arduino to process
             
             # Read response
             response_lines = []
