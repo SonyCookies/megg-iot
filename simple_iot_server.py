@@ -96,23 +96,41 @@ class MEGGIoTServer:
             # Clear any pending data in buffer BEFORE sending command
             self.arduino.reset_input_buffer()
             self.arduino.reset_output_buffer()
-            await asyncio.sleep(0.1)  # Small delay after clearing buffers
+            await asyncio.sleep(0.2)  # Increased delay after clearing buffers
             
             # Send command
             print(f"🔧 Sending command: {command}")
             self.arduino.write(f"{command}\n".encode())
             self.arduino.flush()  # Ensure command is sent immediately
-            await asyncio.sleep(0.3)  # Wait for Arduino to process
+            await asyncio.sleep(0.5)  # Increased wait for Arduino to process
             
             # Read response
             response_lines = []
             timeout = 0
-            while timeout < 150:  # 15 second timeout (for NEMA23 long calibration)
+            max_timeout = 150 if "CALIBRATE" in command else 30  # 15s for calibration, 3s for status
+            
+            while timeout < max_timeout:
                 if self.arduino.in_waiting > 0:
                     line = self.arduino.readline().decode().strip()
                     if line:
                         response_lines.append(line)
                         print(f"📨 Arduino: {line}")
+
+                        # Stream calibration progress to clients in real-time
+                        if command.startswith("CALIBRATE_"):
+                            # Component name is after CALIBRATE_
+                            comp = command.split()[0].replace("CALIBRATE_", "")
+                            payload = {
+                                "type": "calibration_progress",
+                                "component": comp,
+                                "message": line,
+                                "timestamp": datetime.now().isoformat(),
+                            }
+                            await self.broadcast_to_clients(payload)
+                        
+                        # For STATUS command, stop after seeing the closing line
+                        if command == "STATUS" and "===================" in line and len(response_lines) > 5:
+                            break
                         
                         # Check for completion
                         if "CALIBRATION_COMPLETE" in line:
@@ -122,6 +140,10 @@ class MEGGIoTServer:
                 else:
                     await asyncio.sleep(0.1)
                     timeout += 1
+                    
+                    # For STATUS, if we have data and no more coming, break
+                    if command == "STATUS" and len(response_lines) > 5 and timeout > 5:
+                        break
             
             return {
                 "success": True,
@@ -132,11 +154,87 @@ class MEGGIoTServer:
         except Exception as e:
             return {"success": False, "error": str(e)}
     
-    async def handle_calibration(self, component):
+    async def get_weight_reading(self):
+        """Get current weight reading from HX711 sensor"""
+        print("🔍 get_weight_reading() called")
+        if not self.arduino:
+            print("❌ Arduino not connected")
+            return {
+                "type": "weightReading",
+                "success": False,
+                "error": "Arduino not connected"
+            }
+        
+        try:
+            # Send STATUS command to get weight reading
+            result = await self.send_arduino_command("STATUS")
+            print(f"🔍 STATUS result: success={result.get('success')}")
+            
+            if result.get("success"):
+                response_lines = result.get("response", [])
+                print(f"🔍 Response lines: {response_lines}")
+                
+                # Check if HX711 is calibrated
+                is_calibrated = any("HX711 Calibrated: YES" in line for line in response_lines)
+                print(f"🔍 HX711 calibrated: {is_calibrated}")
+                
+                if not is_calibrated:
+                    return {
+                        "type": "weightReading",
+                        "success": False,
+                        "error": "HX711 not calibrated"
+                    }
+                
+                # Parse weight from response
+                for line in response_lines:
+                    if "HX711 Reading:" in line:
+                        print(f"🔍 Found weight line: {line}")
+                        # Extract weight value (format: "HX711 Reading: 23.45 g")
+                        parts = line.split(":")
+                        if len(parts) >= 2:
+                            weight_str = parts[1].strip().replace("g", "").strip()
+                            print(f"🔍 Parsed weight string: '{weight_str}'")
+                            try:
+                                weight = float(weight_str)
+                                print(f"✅ Successfully parsed weight: {weight}")
+                                return {
+                                    "type": "weightReading",
+                                    "success": True,
+                                    "weight": weight,
+                                    "unit": "g",
+                                    "timestamp": datetime.now().isoformat()
+                                }
+                            except ValueError as e:
+                                print(f"❌ ValueError parsing weight: {e}")
+                                pass
+                
+                # If we couldn't parse weight, return error
+                print("❌ Could not parse weight from response")
+                return {
+                    "type": "weightReading",
+                    "success": False,
+                    "error": "Could not parse weight from Arduino response"
+                }
+            else:
+                print(f"❌ STATUS command failed: {result.get('error')}")
+                return {
+                    "type": "weightReading",
+                    "success": False,
+                    "error": result.get("error", "Failed to get weight")
+                }
+        except Exception as e:
+            print(f"❌ Exception in get_weight_reading: {e}")
+            return {
+                "type": "weightReading",
+                "success": False,
+                "error": str(e)
+            }
+    
+    async def handle_calibration(self, component, weight=None):
         """Handle calibration request via router"""
         if self.calibration_router is None:
             self.calibration_router = CalibrationRouter(self.send_arduino_command)
-        result = await self.calibration_router.calibrate_component(component)
+        result = await self.calibration_router.calibrate_component(component, weight)
         # Broadcast in standard envelope
         payload = {
             "type": "calibration_result",
@@ -173,8 +271,9 @@ class MEGGIoTServer:
                     
                     if data.get("type") == "calibration_request":
                         component = data.get("component", "").upper()
+                        weight = data.get("weight")  # Optional weight parameter for HX711
                         if component in ["UNO", "HX711", "NEMA23", "SG90", "MG996R"]:
-                            await self.handle_calibration(component)
+                            await self.handle_calibration(component, weight)
                         else:
                             await websocket.send(json.dumps({
                                 "type": "error",
@@ -195,6 +294,12 @@ class MEGGIoTServer:
                             }
                         }
                         await websocket.send(json.dumps(status))
+                    
+                    elif data.get("type") == "get_weight":
+                        # Get current weight reading from HX711
+                        weight_result = await self.get_weight_reading()
+                        print(f"📤 Sending weight result: {weight_result}")
+                        await websocket.send(json.dumps(weight_result))
                     
                 except json.JSONDecodeError:
                     await websocket.send(json.dumps({

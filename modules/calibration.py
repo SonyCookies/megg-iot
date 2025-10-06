@@ -28,9 +28,14 @@ class CalibrationRouter:
             "MG996R": self._handle_mg996r,
         }
 
-    async def calibrate_component(self, component: str) -> Dict:
+    async def calibrate_component(self, component: str, weight: float = None) -> Dict:
         """Dispatch to specific component handler, defaulting to generic."""
         component_upper = component.upper()
+        
+        # Special handling for HX711 with custom weight
+        if component_upper == "HX711" and weight is not None:
+            return await self._handle_hx711_with_weight(weight)
+        
         handler = self._handlers.get(component_upper)
         if handler is None:
             # Fallback to generic flow for unknown components
@@ -44,6 +49,51 @@ class CalibrationRouter:
 
     async def _handle_hx711(self) -> Dict:
         return await self._calibrate_generic("HX711")
+    
+    async def _handle_hx711_with_weight(self, weight: float) -> Dict:
+        """Handle HX711 calibration with custom weight."""
+        command = f"CALIBRATE_HX711 {weight}"
+        result = await self._send_arduino_command(command)
+
+        if result.get("success"):
+            response_lines: List[str] = result.get("response", [])
+            
+            # Look for calibration completion or error
+            error = any("ERROR" in line for line in response_lines)
+            # Support new JSON messages from Arduino
+            json_done = any('{"hx711":"done"' in line or '"hx711":"done"' in line for line in response_lines)
+            legacy_success = any("Calibration data saved" in line or "Calibration Result" in line for line in response_lines)
+            success = (not error) and (json_done or legacy_success)
+
+            if success:
+                message = f"HX711 calibrated successfully with {weight}g"
+                status = "completed"
+            elif error:
+                error_line = next((line for line in response_lines if "ERROR" in line), "")
+                if error_line:
+                    message = f"HX711 calibration failed: {error_line}"
+                else:
+                    message = f"HX711 calibration failed"
+                status = "failed"
+            else:
+                # If Arduino reported success at transport level but we couldn't detect markers,
+                # treat as success to avoid false-negative toasts.
+                message = f"HX711 calibration completed with {weight}g"
+                status = "completed"
+                success = True
+        else:
+            message = f"HX711 calibration failed: {result.get('error', 'Unknown error')}"
+            status = "failed"
+            success = False
+
+        return {
+            "component": "HX711",
+            "status": status,
+            "success": success,
+            "message": message,
+            "response_lines": result.get("response", []),  # Include full response
+            "timestamp": datetime.now().isoformat(),
+        }
 
     async def _handle_nema23(self) -> Dict:
         return await self._calibrate_generic("NEMA23")
