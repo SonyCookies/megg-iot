@@ -107,7 +107,15 @@ class MEGGIoTServer:
             # Read response
             response_lines = []
             timeout = 0
-            max_timeout = 150 if "CALIBRATE" in command else 30  # 15s for calibration, 3s for status
+            # Extend timeouts for long-running flows
+            if command.startswith("START"):
+                max_timeout = 1200  # ~120s for full cycle
+            elif command.strip() == "STOP":
+                max_timeout = 300   # ~30s to ensure we read STOP_ACK
+            elif "CALIBRATE" in command:
+                max_timeout = 150   # ~15s
+            else:
+                max_timeout = 60    # ~6s for other commands
             
             while timeout < max_timeout:
                 if self.arduino.in_waiting > 0:
@@ -115,6 +123,14 @@ class MEGGIoTServer:
                     if line:
                         response_lines.append(line)
                         print(f"📨 Arduino: {line}")
+
+                        # Stream sorting progress to clients for visibility during START
+                        if command.startswith("START"):
+                            await self.broadcast_to_clients({
+                                "type": "sorting_progress",
+                                "message": line,
+                                "timestamp": datetime.now().isoformat(),
+                            })
 
                         # Stream calibration progress to clients in real-time
                         if command.startswith("CALIBRATE_"):
@@ -136,6 +152,9 @@ class MEGGIoTServer:
                         if "CALIBRATION_COMPLETE" in line:
                             break
                         if "ERROR" in line:
+                            break
+                        # End markers for long-running flows
+                        if command.strip() == "STOP" and ("STOP_ACK" in line or "SYSTEM_STOPPED" in line):
                             break
                 else:
                     await asyncio.sleep(0.1)
@@ -242,6 +261,68 @@ class MEGGIoTServer:
         }
         await self.broadcast_to_clients(payload)
         return payload
+
+    async def start_sorting_process(self):
+        """Start the physical sorting process by sending START (with ranges if present) in background."""
+        # Preconditions
+        if not self.arduino:
+            return {"success": False, "error": "Arduino not connected"}
+        cfg = getattr(self, 'current_configuration', None)
+        if not cfg or not isinstance(cfg, dict) or not cfg.get('configurations'):
+            return {"success": False, "error": "No configuration provided"}
+
+        # Build START command with ranges if possible
+        cmd = "START"
+        try:
+            ranges = cfg['configurations'].get('eggSizeRanges') or cfg['configurations'].get('egg_ranges')
+            if ranges:
+                s_min = float(ranges['small']['min'])
+                s_max = float(ranges['small']['max'])
+                m_min = float(ranges['medium']['min'])
+                m_max = float(ranges['medium']['max'])
+                l_min = float(ranges['large']['min'])
+                l_max = float(ranges['large']['max'])
+                cmd = f"START {s_min} {s_max} {m_min} {m_max} {l_min} {l_max}"
+        except Exception as e:
+            # If parsing fails, fallback to plain START and proceed
+            print(f"⚠️ Failed to build ranges for START: {e}. Falling back to 'START'.")
+
+        # Send a unique marker to Arduino logs for clarity, then run long-running command in background
+        try:
+            self.arduino.write(b"CMD:START_SORTING\n")
+            self.arduino.flush()
+        except Exception as e:
+            print(f"⚠️ Failed to write START marker to Arduino: {e}")
+
+        # Run long-running command in background and immediately acknowledge
+        asyncio.create_task(
+            self._execute_long_running_command_and_broadcast_result(cmd, "sorting_result")
+        )
+        return {
+            "success": True,
+            "message": "Sorting process initiated. Waiting for hardware completion signal."
+        }
+
+    async def stop_sorting_process(self):
+        """Send STOP to hardware in background and return immediate ack."""
+        if not self.arduino:
+            return {"success": False, "error": "Arduino not connected"}
+
+        # Send a unique marker to Arduino logs for clarity, then run STOP in background
+        try:
+            self.arduino.write(b"CMD:STOP_SORTING\n")
+            self.arduino.flush()
+        except Exception as e:
+            print(f"⚠️ Failed to write STOP marker to Arduino: {e}")
+
+        # Run STOP in background
+        asyncio.create_task(
+            self._execute_long_running_command_and_broadcast_result("STOP", "sorting_stop_result")
+        )
+        return {
+            "success": True,
+            "message": "Stop request sent to hardware."
+        }
     
     async def broadcast_to_clients(self, message):
         """Send message to all connected WebSocket clients"""
@@ -257,6 +338,24 @@ class MEGGIoTServer:
             
             # Remove disconnected clients
             self.connected_clients -= disconnected
+
+    async def _execute_long_running_command_and_broadcast_result(self, command: str, result_type: str):
+        """Execute a long-running Arduino command and broadcast the final result to all clients."""
+        try:
+            result = await self.send_arduino_command(command)
+            payload = {
+                "type": result_type,
+                "success": bool(result.get("success")),
+                "message": result.get("message"),
+                "error": result.get("error")
+            }
+        except Exception as e:
+            payload = {
+                "type": result_type,
+                "success": False,
+                "error": str(e)
+            }
+        await self.broadcast_to_clients(payload)
     
     async def handle_client(self, websocket):
         """Handle WebSocket client connection"""
@@ -300,6 +399,88 @@ class MEGGIoTServer:
                         weight_result = await self.get_weight_reading()
                         print(f"📤 Sending weight result: {weight_result}")
                         await websocket.send(json.dumps(weight_result))
+
+                    elif data.get("type") == "set_configuration":
+                        # Accept and store user configuration (egg size ranges, metadata)
+                        cfg = data.get("configurations")
+                        account_id = data.get("accountId") or data.get("account_id")
+                        metadata = data.get("metadata") or {}
+                        uid = data.get("uid")
+                        if not account_id or not cfg:
+                            await websocket.send(json.dumps({
+                                "type": "configuration_result",
+                                "success": False,
+                                "error": "Missing accountId or configurations"
+                            }))
+                        else:
+                            # Store configuration in memory for the session
+                            self.current_configuration = {
+                                "accountId": str(account_id),
+                                "configurations": cfg,
+                                "metadata": metadata,
+                                "uid": uid,
+                                "receivedAt": datetime.now().isoformat()
+                            }
+                            print(f"✅ Configuration stored for {account_id}: {self.current_configuration}")
+                            await websocket.send(json.dumps({
+                                "type": "configuration_result",
+                                "success": True,
+                                "accountId": account_id
+                            }))
+
+                    elif data.get("type") == "send_command":
+                        # Forward a raw command string to Arduino and return response
+                        cmd = str(data.get("command", "")).strip()
+                        if not cmd:
+                            await websocket.send(json.dumps({
+                                "type": "error",
+                                "message": "Missing 'command' field for send_command"
+                            }))
+                        elif not self.arduino:
+                            await websocket.send(json.dumps({
+                                "type": "error",
+                                "message": "Arduino not connected"
+                            }))
+                        else:
+                            result = await self.send_arduino_command(cmd)
+                            # Echo back a structured result
+                            await websocket.send(json.dumps({
+                                "type": "command_result",
+                                "command": cmd,
+                                **result
+                            }))
+
+                    elif data.get("type") == "start_sorting":
+                        # Start sorting using current configuration (if available)
+                        res = await self.start_sorting_process()
+                        await websocket.send(json.dumps({
+                            "type": "sorting_result",
+                            **res
+                        }))
+
+                    elif data.get("type") == "stop_sorting":
+                        # Stop sorting (non-blocking)
+                        res = await self.stop_sorting_process()
+                        await websocket.send(json.dumps({
+                            "type": "sorting_stop_result",
+                            **res
+                        }))
+
+                    elif data.get("command") in ("start_sorting", "stop_sorting"):
+                        # Support structured client command payloads
+                        cmd = data.get("command")
+                        if cmd == "start_sorting":
+                            res = await self.start_sorting_process()
+                            await websocket.send(json.dumps({
+                                "type": "sorting_result",
+                                **res
+                            }))
+                        elif cmd == "stop_sorting":
+                            res = await self.stop_sorting_process()
+                            await websocket.send(json.dumps({
+                                "type": "sorting_stop_result",
+                                **res
+                            }))
                     
                 except json.JSONDecodeError:
                     await websocket.send(json.dumps({
@@ -329,7 +510,7 @@ class MEGGIoTServer:
         
         async with websockets.serve(self.handle_client, host, port):
             print(f"✅ MEGG IoT Backend running on ws://{host}:{port}")
-            print("🔧 Available commands: calibration_request, get_status")
+            print("🔧 Available commands: calibration_request, get_status, get_weight, set_configuration, send_command, start_sorting, stop_sorting, client_command(start_sorting|stop_sorting)")
             print("📱 Ready for client connections!")
             
             # Keep server running
