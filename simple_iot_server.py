@@ -1,3 +1,6 @@
+#iot-backend/simplle_iot_server.py
+
+
 #!/usr/bin/env python3
 """
 MEGG IoT Backend - Simple Real Hardware Server
@@ -117,6 +120,7 @@ class MEGGIoTServer:
             else:
                 max_timeout = 60    # ~6s for other commands
             
+            last_weight = None
             while timeout < max_timeout:
                 if self.arduino.in_waiting > 0:
                     line = self.arduino.readline().decode().strip()
@@ -131,6 +135,28 @@ class MEGGIoTServer:
                                 "message": line,
                                 "timestamp": datetime.now().isoformat(),
                             })
+
+                            # Parse measurement and classification to emit egg_processed
+                            try:
+                                if line.startswith("HX711: Weight measured:"):
+                                    # e.g., "HX711: Weight measured: 47.12 g"
+                                    parts = line.split(":")[-1].strip().split(" ")
+                                    if parts:
+                                        last_weight = float(parts[0])
+                                elif "classified as" in line and line.startswith("SORT: Egg ("):
+                                    # e.g., "SORT: Egg (47.12g) classified as MEDIUM"
+                                    size = line.split("classified as")[-1].strip()
+                                    payload = {
+                                        "type": "egg_processed",
+                                        "weight": last_weight,
+                                        "size": size,
+                                        "accountId": (self.current_configuration or {}).get("accountId"),
+                                        "batchId": (self.current_configuration or {}).get("batchId") or ((self.current_configuration or {}).get("currentBatch") or {}).get("id"),
+                                        "timestamp": datetime.now().isoformat(),
+                                    }
+                                    await self.broadcast_to_clients(payload)
+                            except Exception as _:
+                                pass
 
                         # Stream calibration progress to clients in real-time
                         if command.startswith("CALIBRATE_"):
