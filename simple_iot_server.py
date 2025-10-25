@@ -360,20 +360,20 @@ class MEGGIoTServer:
         if not self.arduino:
             return {"success": False, "error": "Arduino not connected"}
 
-        # Send a unique marker to Arduino logs for clarity, then run STOP in background
+        # Send a unique marker to Arduino logs for clarity
         try:
             self.arduino.write(b"CMD:STOP_SORTING\n")
             self.arduino.flush()
         except Exception as e:
             print(f"⚠️ Failed to write STOP marker to Arduino: {e}")
 
-        # Run STOP in background
-        asyncio.create_task(
-            self._execute_long_running_command_and_broadcast_result("STOP", "sorting_stop_result")
-        )
+        # Write STOP immediately without waiting for the long-running START read to finish
+        await self.write_arduino_command_only("STOP")
+
+        # Return immediate acknowledgement (the running START loop will observe STOP and end at cycle boundary)
         return {
             "success": True,
-            "message": "Stop request sent to hardware."
+            "message": "Stop request sent; will stop after current cycle."
         }
     
     async def broadcast_to_clients(self, message):
