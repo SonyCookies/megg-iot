@@ -25,6 +25,8 @@ class MEGGIoTServer:
         self.arduino = None
         self.connected_clients = set()
         self.calibration_router: CalibrationRouter | None = None
+        self.serial_lock: asyncio.Lock | None = asyncio.Lock()
+        self.serial_write_lock: asyncio.Lock | None = asyncio.Lock()
         
         # Auto-detect ports based on operating system
         if platform.system() == "Windows":
@@ -79,6 +81,12 @@ class MEGGIoTServer:
                 if self.arduino.in_waiting > 0:
                     response = self.arduino.readline().decode().strip()
                     print(f"✅ Arduino connected on {port}: {response}")
+                    # Broadcast current status to clients
+                    await self.broadcast_to_clients({
+                        "type": "system_status",
+                        "server": {"status": "running"},
+                        "arduino": {"connected": True},
+                    })
                     return True
                     
             except Exception as e:
@@ -94,110 +102,128 @@ class MEGGIoTServer:
         """Send command to Arduino and get response"""
         if not self.arduino:
             return {"success": False, "error": "Arduino not connected"}
-            
-        try:
-            # Clear any pending data in buffer BEFORE sending command
-            self.arduino.reset_input_buffer()
-            self.arduino.reset_output_buffer()
-            await asyncio.sleep(0.2)  # Increased delay after clearing buffers
-            
-            # Send command
-            print(f"🔧 Sending command: {command}")
-            self.arduino.write(f"{command}\n".encode())
-            self.arduino.flush()  # Ensure command is sent immediately
-            await asyncio.sleep(0.5)  # Increased wait for Arduino to process
-            
-            # Read response
-            response_lines = []
-            timeout = 0
-            # Extend timeouts for long-running flows
-            if command.startswith("START"):
-                max_timeout = 1200  # ~120s for full cycle
-            elif command.strip() == "STOP":
-                max_timeout = 300   # ~30s to ensure we read STOP_ACK
-            elif "CALIBRATE" in command:
-                max_timeout = 150   # ~15s
-            else:
-                max_timeout = 60    # ~6s for other commands
-            
-            last_weight = None
-            while timeout < max_timeout:
-                if self.arduino.in_waiting > 0:
-                    line = self.arduino.readline().decode().strip()
-                    if line:
-                        response_lines.append(line)
-                        print(f"📨 Arduino: {line}")
+        
+        # Serialize access to the serial port to avoid buffer races
+        async with self.serial_lock:
+            try:
+                # Clear small pending data before sending, but do not aggressively flush during others' reads
+                try:
+                    self.arduino.reset_input_buffer()
+                    self.arduino.reset_output_buffer()
+                except Exception:
+                    pass
+                await asyncio.sleep(0.05)
 
-                        # Stream sorting progress to clients for visibility during START
-                        if command.startswith("START"):
-                            await self.broadcast_to_clients({
-                                "type": "sorting_progress",
-                                "message": line,
-                                "timestamp": datetime.now().isoformat(),
-                            })
-
-                            # Parse measurement and classification to emit egg_processed
-                            try:
-                                if line.startswith("HX711: Weight measured:"):
-                                    # e.g., "HX711: Weight measured: 47.12 g"
-                                    parts = line.split(":")[-1].strip().split(" ")
-                                    if parts:
-                                        last_weight = float(parts[0])
-                                elif "classified as" in line and line.startswith("SORT: Egg ("):
-                                    # e.g., "SORT: Egg (47.12g) classified as MEDIUM"
-                                    size = line.split("classified as")[-1].strip()
-                                    payload = {
-                                        "type": "egg_processed",
-                                        "weight": last_weight,
-                                        "size": size,
-                                        "accountId": (self.current_configuration or {}).get("accountId"),
-                                        "batchId": (self.current_configuration or {}).get("batchId") or ((self.current_configuration or {}).get("currentBatch") or {}).get("id"),
-                                        "timestamp": datetime.now().isoformat(),
-                                    }
-                                    await self.broadcast_to_clients(payload)
-                            except Exception as _:
-                                pass
-
-                        # Stream calibration progress to clients in real-time
-                        if command.startswith("CALIBRATE_"):
-                            # Component name is after CALIBRATE_
-                            comp = command.split()[0].replace("CALIBRATE_", "")
-                            payload = {
-                                "type": "calibration_progress",
-                                "component": comp,
-                                "message": line,
-                                "timestamp": datetime.now().isoformat(),
-                            }
-                            await self.broadcast_to_clients(payload)
-                        
-                        # For STATUS command, stop after seeing the closing line
-                        if command == "STATUS" and "===================" in line and len(response_lines) > 5:
-                            break
-                        
-                        # Check for completion
-                        if "CALIBRATION_COMPLETE" in line:
-                            break
-                        if "ERROR" in line:
-                            break
-                        # End markers for long-running flows
-                        if command.strip() == "STOP" and ("STOP_ACK" in line or "SYSTEM_STOPPED" in line):
-                            break
+                # Send command
+                print(f"🔧 Sending command: {command}")
+                self.arduino.write(f"{command}\n".encode())
+                self.arduino.flush()  # Ensure command is sent immediately
+                await asyncio.sleep(0.2)
+                
+                # Read response
+                response_lines = []
+                timeout = 0
+                # Extend timeouts for long-running flows
+                if command.startswith("START"):
+                    max_timeout = 1200  # ~120s for full cycle
+                elif command.strip() == "STOP":
+                    max_timeout = 300   # ~30s to ensure we read STOP_ACK
+                elif "CALIBRATE" in command:
+                    max_timeout = 150   # ~15s
                 else:
-                    await asyncio.sleep(0.1)
-                    timeout += 1
-                    
-                    # For STATUS, if we have data and no more coming, break
-                    if command == "STATUS" and len(response_lines) > 5 and timeout > 5:
-                        break
-            
-            return {
-                "success": True,
-                "response": response_lines,
-                "message": response_lines[-1] if response_lines else "No response"
-            }
-            
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+                    max_timeout = 60    # ~6s for other commands
+
+                last_weight = None
+                while timeout < max_timeout:
+                    if self.arduino.in_waiting > 0:
+                        line = self.arduino.readline().decode().strip()
+                        if line:
+                            response_lines.append(line)
+                            print(f"📨 Arduino: {line}")
+
+                            # Stream sorting progress to clients for visibility during START
+                            if command.startswith("START"):
+                                await self.broadcast_to_clients({
+                                    "type": "sorting_progress",
+                                    "message": line,
+                                    "timestamp": datetime.now().isoformat(),
+                                })
+
+                                # Parse measurement and classification to emit egg_processed
+                                try:
+                                    if line.startswith("HX711: Weight measured:"):
+                                        # e.g., "HX711: Weight measured: 47.12 g"
+                                        parts = line.split(":")[-1].strip().split(" ")
+                                        if parts:
+                                            last_weight = float(parts[0])
+                                    elif "classified as" in line and line.startswith("SORT: Egg ("):
+                                        # e.g., "SORT: Egg (47.12g) classified as MEDIUM"
+                                        size = line.split("classified as")[-1].strip()
+                                        payload = {
+                                            "type": "egg_processed",
+                                            "weight": last_weight,
+                                            "size": size,
+                                            "accountId": (self.current_configuration or {}).get("accountId"),
+                                            "batchId": (self.current_configuration or {}).get("batchId") or ((self.current_configuration or {}).get("currentBatch") or {}).get("id"),
+                                            "timestamp": datetime.now().isoformat(),
+                                        }
+                                        await self.broadcast_to_clients(payload)
+                                except Exception as _:
+                                    pass
+
+                            # Stream calibration progress to clients in real-time
+                            if command.startswith("CALIBRATE_"):
+                                # Component name is after CALIBRATE_
+                                comp = command.split()[0].replace("CALIBRATE_", "")
+                                payload = {
+                                    "type": "calibration_progress",
+                                    "component": comp,
+                                    "message": line,
+                                    "timestamp": datetime.now().isoformat(),
+                                }
+                                await self.broadcast_to_clients(payload)
+                            
+                            # For STATUS command, stop after seeing the closing line
+                            if command == "STATUS" and "===================" in line and len(response_lines) > 5:
+                                break
+                            
+                            # Check for completion
+                            if "CALIBRATION_COMPLETE" in line:
+                                break
+                            if "ERROR" in line:
+                                break
+                            # End markers for long-running flows
+                            if command.strip() == "STOP" and ("STOP_ACK" in line or "SYSTEM_STOPPED" in line):
+                                break
+                    else:
+                        await asyncio.sleep(0.1)
+                        timeout += 1
+                        
+                        # For STATUS, if we have data and no more coming, break
+                        if command == "STATUS" and len(response_lines) > 5 and timeout > 5:
+                            break
+
+                return {
+                    "success": True,
+                    "response": response_lines,
+                    "message": response_lines[-1] if response_lines else "No response"
+                }
+            except Exception as e:
+                return {"success": False, "error": str(e)}
+
+    async def write_arduino_command_only(self, command: str):
+        """Write a command to Arduino without holding the read loop or waiting for a response."""
+        if not self.arduino:
+            return {"success": False, "error": "Arduino not connected"}
+        async with self.serial_write_lock:
+            try:
+                print(f"🔧 Sending command (write-only): {command}")
+                self.arduino.write(f"{command}\n".encode())
+                self.arduino.flush()
+                await asyncio.sleep(0.05)
+                return {"success": True}
+            except Exception as e:
+                return {"success": False, "error": str(e)}
     
     async def get_weight_reading(self):
         """Get current weight reading from HX711 sensor"""
@@ -387,6 +413,15 @@ class MEGGIoTServer:
         """Handle WebSocket client connection"""
         print(f"🔌 New client connected: {websocket.remote_address}")
         self.connected_clients.add(websocket)
+        # Push an immediate status snapshot to the new client
+        try:
+            await websocket.send(json.dumps({
+                "type": "system_status",
+                "server": {"status": "running"},
+                "arduino": {"connected": self.arduino is not None},
+            }))
+        except Exception:
+            pass
         
         try:
             async for message in websocket:
@@ -397,7 +432,7 @@ class MEGGIoTServer:
                     if data.get("type") == "calibration_request":
                         component = data.get("component", "").upper()
                         weight = data.get("weight")  # Optional weight parameter for HX711
-                        if component in ["UNO", "HX711", "NEMA23", "SG90", "MG996R"]:
+                        if component in ["UNO", "HX711", "NEMA23", "SG90", "LOADER", "MG996R"]:
                             await self.handle_calibration(component, weight)
                         else:
                             await websocket.send(json.dumps({
@@ -415,6 +450,7 @@ class MEGGIoTServer:
                                 "HX711": {"status": "unknown"},
                                 "NEMA23": {"status": "unknown"},
                                 "SG90": {"status": "unknown"},
+                                "LOADER": {"status": "unknown"},
                                 "MG996R": {"status": "unknown"}
                             }
                         }
@@ -468,7 +504,11 @@ class MEGGIoTServer:
                                 "message": "Arduino not connected"
                             }))
                         else:
-                            result = await self.send_arduino_command(cmd)
+                            # QUALITY commands should not be blocked by long-running START reads
+                            if cmd.startswith("QUALITY "):
+                                result = await self.write_arduino_command_only(cmd)
+                            else:
+                                result = await self.send_arduino_command(cmd)
                             # Echo back a structured result
                             await websocket.send(json.dumps({
                                 "type": "command_result",

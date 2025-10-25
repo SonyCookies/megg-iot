@@ -25,6 +25,7 @@ class CalibrationRouter:
             "HX711": self._handle_hx711,
             "NEMA23": self._handle_nema23,
             "SG90": self._handle_sg90,
+            "LOADER": self._handle_loader,
             "MG996R": self._handle_mg996r,
         }
 
@@ -100,6 +101,10 @@ class CalibrationRouter:
 
     async def _handle_sg90(self) -> Dict:
         return await self._calibrate_generic("SG90")
+
+    async def _handle_loader(self) -> Dict:
+        # New loader servo (replaces SG90) -> sends CALIBRATE_LOADER
+        return await self._calibrate_generic("LOADER")
 
     async def _handle_mg996r(self) -> Dict:
         return await self._calibrate_generic("MG996R")
