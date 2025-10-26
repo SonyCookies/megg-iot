@@ -141,7 +141,7 @@ class MEGGIoTServer:
                             response_lines.append(line)
                             print(f"📨 Arduino: {line}")
 
-                            # Stream sorting progress to clients for visibility during START
+                            # Stream sorting progress to clients for visibility during START/START_PLAIN
                             if command.startswith("START"):
                                 await self.broadcast_to_clients({
                                     "type": "sorting_progress",
@@ -194,6 +194,9 @@ class MEGGIoTServer:
                                 break
                             # End markers for long-running flows
                             if command.strip() == "STOP" and ("STOP_ACK" in line or "SYSTEM_STOPPED" in line):
+                                break
+                            # If we are running a START/START_PLAIN loop, exit promptly when hardware reports stop
+                            if command.startswith("START") and ("STOP_ACK" in line or "SYSTEM_STOPPED" in line):
                                 break
                     else:
                         await asyncio.sleep(0.1)
