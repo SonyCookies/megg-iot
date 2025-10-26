@@ -355,6 +355,42 @@ class MEGGIoTServer:
             "message": "Sorting process initiated. Waiting for hardware completion signal."
         }
 
+    async def start_plain_sorting_process(self):
+        """Start the physical sorting in weight-only mode by sending START_PLAIN (with ranges if present) in background."""
+        if not self.arduino:
+            return {"success": False, "error": "Arduino not connected"}
+        cfg = getattr(self, 'current_configuration', None)
+        if not cfg or not isinstance(cfg, dict) or not cfg.get('configurations'):
+            return {"success": False, "error": "No configuration provided"}
+
+        cmd = "START_PLAIN"
+        try:
+            ranges = cfg['configurations'].get('eggSizeRanges') or cfg['configurations'].get('egg_ranges')
+            if ranges:
+                s_min = float(ranges['small']['min'])
+                s_max = float(ranges['small']['max'])
+                m_min = float(ranges['medium']['min'])
+                m_max = float(ranges['medium']['max'])
+                l_min = float(ranges['large']['min'])
+                l_max = float(ranges['large']['max'])
+                cmd = f"START_PLAIN {s_min} {s_max} {m_min} {m_max} {l_min} {l_max}"
+        except Exception as e:
+            print(f"⚠️ Failed to build ranges for START_PLAIN: {e}. Falling back to 'START_PLAIN'.")
+
+        try:
+            self.arduino.write(b"CMD:START_PLAIN_SORTING\n")
+            self.arduino.flush()
+        except Exception as e:
+            print(f"⚠️ Failed to write START_PLAIN marker to Arduino: {e}")
+
+        asyncio.create_task(
+            self._execute_long_running_command_and_broadcast_result(cmd, "plain_sorting_result")
+        )
+        return {
+            "success": True,
+            "message": "Plain sorting process initiated. Waiting for hardware completion signal."
+        }
+
     async def stop_sorting_process(self):
         """Send STOP to hardware in background and return immediate ack."""
         if not self.arduino:
@@ -524,6 +560,14 @@ class MEGGIoTServer:
                             **res
                         }))
 
+                    elif data.get("type") == "start_plain_sorting":
+                        # Start plain (weight-only) sorting
+                        res = await self.start_plain_sorting_process()
+                        await websocket.send(json.dumps({
+                            "type": "plain_sorting_result",
+                            **res
+                        }))
+
                     elif data.get("type") == "stop_sorting":
                         # Stop sorting (non-blocking)
                         res = await self.stop_sorting_process()
@@ -547,6 +591,12 @@ class MEGGIoTServer:
                                 "type": "sorting_stop_result",
                                 **res
                             }))
+                    elif data.get("command") == "start_plain_sorting":
+                        res = await self.start_plain_sorting_process()
+                        await websocket.send(json.dumps({
+                            "type": "plain_sorting_result",
+                            **res
+                        }))
                     
                 except json.JSONDecodeError:
                     await websocket.send(json.dumps({
