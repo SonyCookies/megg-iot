@@ -5,14 +5,14 @@ Wants=network.target
 
 [Service]
 Type=simple
-User=pi
-Group=pi
-WorkingDirectory=/home/pi/megg-iot-backend
+User=megg
+Group=megg
+WorkingDirectory=/home/megg/megg-iot-backend
 Environment=ARDUINO_PORT=/dev/ttyUSB0
 Environment=ARDUINO_BAUDRATE=9600
 Environment=IOT_BACKEND_HOST=0.0.0.0
 Environment=IOT_BACKEND_PORT=8765
-ExecStart=/home/pi/megg-iot-backend/venv/bin/python simple_main.py
+ExecStart=/home/megg/megg-iot/venv/bin/python simple_iot_server.py
 Restart=always
 RestartSec=10
 StandardOutput=journal

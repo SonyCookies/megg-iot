@@ -129,12 +129,15 @@ class MEGGIoTServer:
                 elif command.strip() == "STOP":
                     max_timeout = 300   # ~30s to ensure we read STOP_ACK
                 elif "CALIBRATE" in command:
-                    max_timeout = 150   # ~15s
+                    # For calibration, keep reading until explicit completion/error markers.
+                    # Use None to indicate no hard timeout, but keep a very high ceiling as a safety valve.
+                    max_timeout = None
+                    safety_timeout = 3600  # ~6 minutes safety cut-off
                 else:
                     max_timeout = 60    # ~6s for other commands
 
                 last_weight = None
-                while timeout < max_timeout:
+                while True:
                     if self.arduino.in_waiting > 0:
                         line = self.arduino.readline().decode().strip()
                         if line:
@@ -190,6 +193,8 @@ class MEGGIoTServer:
                             # Check for completion
                             if "CALIBRATION_COMPLETE" in line:
                                 break
+                            if '"hx711":"done"' in line or '"hx711": "done"' in line:
+                                break
                             if "ERROR" in line:
                                 break
                             # End markers for long-running flows
@@ -201,7 +206,14 @@ class MEGGIoTServer:
                     else:
                         await asyncio.sleep(0.1)
                         timeout += 1
-                        
+
+                        # For calibration: no hard timeout, but respect safety timeout to avoid hanging forever
+                        if "CALIBRATE" in command and timeout > safety_timeout:
+                            response_lines.append("CALIBRATION_TIMEOUT_SAFETY")
+                            break
+                        # For other commands, honor max_timeout
+                        if max_timeout is not None and timeout >= max_timeout:
+                            break
                         # For STATUS, if we have data and no more coming, break
                         if command == "STATUS" and len(response_lines) > 5 and timeout > 5:
                             break
